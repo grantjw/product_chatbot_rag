@@ -1,5 +1,5 @@
 # product_chatbot_rag
-# Streamlit + Langchain + LLama.cpp w/ Mistral: Retrieval Augmented Generation
+# LLama.cpp w/ Mistral 7b: RAG Product Reviewer
 
 This chatbot has conversational memory and can hold follow up conversations within the same session.
 
