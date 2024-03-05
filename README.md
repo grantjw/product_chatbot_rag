@@ -1,5 +1,6 @@
 # product_chatbot_rag
 # LLama.cpp w/ Mistral 7b: RAG Product Reviewer
+See the app live on here: [Aesop Review Chatbot](https://huggingface.co/spaces/grantjw/Aesop_Review_Chatbot)
 
 This chatbot has conversational memory and can hold follow up conversations within the same session.
 
