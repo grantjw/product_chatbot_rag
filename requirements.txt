@@ -6,3 +6,4 @@ pydantic==1.10.8
 PyMuPDF==1.23.5
 sentence-transformers==2.2.2
 streamlit==1.27.2
+streamlit_chat
