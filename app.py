@@ -1,16 +1,18 @@
 import streamlit as st
-from bs4 import BeautifulSoup
 import io
 import fitz
 import requests
+from streamlit_chat import message
 from langchain.llms import LlamaCpp
 from langchain.callbacks.base import BaseCallbackHandler
-from langchain.vectorstores import DocArrayInMemorySearch
 from langchain.docstore.document import Document
 from langchain.embeddings import HuggingFaceEmbeddings
 from langchain.memory import ConversationBufferMemory
 from langchain.chains import ConversationalRetrievalChain
 from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain.vectorstores import FAISS
+from huggingface_hub import hf_hub_download
+
 import pandas as pd
 
 
@@ -31,23 +33,23 @@ class StreamHandler(BaseCallbackHandler):
 def load_reviews(url):
     #url = "https://raw.githubusercontent.com/grantjw/aesop-review/main/output_transcripts.csv"
     df = pd.read_csv(url)
-    # Assuming your DataFrame is named df
+    # remove non-scraped transcript
     df = df[(df['Transcript'] != ' ') & (df['Transcript'] != '')]
     # Assuming df DataFrame containing 'Transcript' and 'Video URL' columns
-    all_content = [(row['Video URL'], row['Transcript']) for index, row in df.iterrows()]
-    documents = [Document(page_content=doc, metadata={'url': url}) for (url, doc) in all_content]
-    return documents
+    review = df['Transcript'].str.cat(sep='\n')
+    return review
 
 @st.cache_resource
 def get_retriever(url):
-    documents = load_reviews(url)
-    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1500, chunk_overlap=200)
-    # Split each review into chunks and create a Document object for each chunk
-    docs = text_splitter.split_documents(documents)
+    reviews = load_reviews(url)
+    text_splitter = RecursiveCharacterTextSplitter(chunk_size=400, chunk_overlap=40,separators=['\n',"',",' ', ''])
+    chunk_list = []
+    chunks = text_splitter.split_text(reviews)
+    chunk_list.extend(chunks)
     embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
-    db = DocArrayInMemorySearch.from_documents(docs, embeddings)
-    print("at least we ar ehere?")
-    retriever = db.as_retriever(search_type="mmr", search_kwargs={"k": 5, "fetch_k": 10})
+    db = FAISS.from_texts(chunk_list, embeddings)
+    #db.similarity_search("customer service",k=5)
+    retriever = db.as_retriever()
     return retriever
 
 
@@ -63,18 +65,25 @@ def create_chain(_retriever):
     # stream handler to make it appear as if the LLM is typing the
     # responses in real time.
     # callback_manager = CallbackManager([stream_handler])
+    (repo_id, model_file_name) = ("TheBloke/Mistral-7B-Instruct-v0.1-GGUF",
+                                  "mistral-7b-instruct-v0.1.Q4_K_M.gguf")
 
+    model_path = hf_hub_download(repo_id=repo_id,
+                                 filename=model_file_name,
+                                 repo_type="model")
+    
     n_gpu_layers = 1  # Change this value based on your model and your GPU VRAM pool.
     n_batch = 1024 # Should be between 1 and n_ctx, consider the amount of VRAM in your GPU.
 
     llm = LlamaCpp(
-            model_path="models/mistral-7b-instruct-v0.1.Q5_0.gguf",
+            model_path=model_path,
             n_batch=n_batch,
-            n_ctx=2048,
+            n_ctx=4096,
             max_tokens=2048,
-            temperature=0,
+            temperature=.33,
             # callback_manager=callback_manager,
-            verbose=False,
+            top_p=1, 
+            verbose=True,
             streaming=True,
             )
 
@@ -95,74 +104,53 @@ def create_chain(_retriever):
     return qa_chain
 
 
-# Set the webpage title
-st.set_page_config(
-    page_title="Youtube Aesop Product Reviewer"
-)
 
-# Create a header element
-st.header("Youtube Aesop Product Reviewer")
+def initialize_session_state():
+    if 'history' not in st.session_state:
+        st.session_state['history'] = []
 
-#
-system_prompt = st.text_area(
-    label="System Prompt",
-    value="You are a helpful AI assistant who answers questions in short sentences.",
-    key="system_prompt")
+    if 'generated' not in st.session_state:
+        st.session_state['generated'] = ["Hi, I know what Youtubers said about Aesop's products. Ask me!"]
 
-if "base_url" not in st.session_state:
-    st.session_state.base_url = ""
+    if 'past' not in st.session_state:
+        st.session_state['past'] = ["Hey! 👋"]
 
-base_url = st.text_input("Enter the site url here", key="base_url")
+def conversation_chat(query, chain, history):
+    result = chain({"question": query, "chat_history": history})
+    history.append((query, result["answer"]))
+    return result["answer"]
 
-if st.session_state.base_url != "":
+def display_chat_history(chain):
+    reply_container = st.container()
+    container = st.container()
+
+    with container:
+        with st.form(key='my_form', clear_on_submit=True):
+            user_input = st.text_input("Question:", placeholder="      ", key='input')
+            submit_button = st.form_submit_button(label='Send')
+
+        if submit_button and user_input:
+            with st.spinner('Generating response...'):
+                output = conversation_chat(user_input, chain, st.session_state['history'])
+
+            st.session_state['past'].append(user_input)
+            st.session_state['generated'].append(output)
+
+    if st.session_state['generated']:
+        with reply_container:
+            for i in range(len(st.session_state['generated'])):
+                message(st.session_state["past"][i], is_user=True, key=str(i) + '_user', avatar_style="thumbs")
+                message(st.session_state["generated"][i], key=str(i), avatar_style="fun-emoji")
+
+base_url = "https://raw.githubusercontent.com/grantjw/product_chatbot_rag/main/data/output_transcripts.csv"
+retriever = get_retriever(base_url)
+llm_chain = create_chain(retriever)
+initialize_session_state()
+st.title("Aesop Product Reviewer from YouTube Reviews")
+st.image("aesop.png", width=550)
+st.markdown("""
+    This app provides insights into Aesop products based on YouTube reviews.
     
-    retriever = get_retriever(base_url)
-
-    # We store the conversation in the session state.
-    # This will be used to render the chat conversation.
-    # We initialize it with the first message we want to be greeted with.
-    if "messages" not in st.session_state:
-        st.session_state.messages = [
-            {"role": "assistant", "content": "How may I help you today?"}
-        ]
-
-    if "current_response" not in st.session_state:
-        st.session_state.current_response = ""
-
-    # We loop through each message in the session state and render it as
-    # a chat message.
-    for message in st.session_state.messages:
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
-
-    # We initialize the quantized LLM from a local path.
-    # Currently most parameters are fixed but we can make them
-    # configurable.
-    llm_chain = create_chain(retriever)
-
-    # We take questions/instructions from the chat input to pass to the LLM
-    if user_prompt := st.chat_input("Your message here", key="user_input"):
-
-        # Add our input to the session state
-        st.session_state.messages.append(
-            {"role": "user", "content": user_prompt}
-        )
-
-        # Add our input to the chat window
-        with st.chat_message("user"):
-            st.markdown(user_prompt)
-
-        # Pass our input to the llm chain and capture the final responses.
-        # It is worth noting that the Stream Handler is already receiving the
-        # streaming response as the llm is generating. We get our response
-        # here once the llm has finished generating the complete response.
-        response = llm_chain.run(user_prompt)
-
-        # Add the response to the session state
-        st.session_state.messages.append(
-            {"role": "assistant", "content": response}
-        )
-
-        # Add the response to the chat window
-        with st.chat_message("assistant"):
-            st.markdown(response)
+    [![View on GitHub](https://img.shields.io/badge/GitHub-View_on_GitHub-blue?logo=github)](https://github.com/grantjw/product_chatbot_rag)
+    """, unsafe_allow_html=True)
+display_chat_history(llm_chain)
